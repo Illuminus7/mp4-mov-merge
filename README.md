@@ -109,4 +109,4 @@ To make a DMG for a release:
 
 ## License
 
-No license has been chosen yet.
+MIT License. See [LICENSE](LICENSE) for the full text.
