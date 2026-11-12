@@ -6,12 +6,6 @@ struct MergeFailure: LocalizedError {
     var errorDescription: String? { message }
 }
 
-/// Thrown when a None merge needs matching videos but they differ; the caller can retry with re-encoding.
-struct CopyMismatch: LocalizedError {
-    let message: String
-    var errorDescription: String? { message }
-}
-
 struct MergeCancelled: LocalizedError {
     var errorDescription: String? { "Cancelled. No file was saved." }
 }
@@ -244,27 +238,28 @@ final class MergeEngine {
         )
     }
 
-    private func validateCopy(_ paths: [URL]) throws -> [VideoInfo] {
+    /// Codecs an MP4 can hold as they are, so a stream copy works without re-encoding.
+    private static let copyVideoCodecs: Set<String> = ["h264", "hevc", "av1", "mpeg4"]
+    private static let copyAudioCodecs: Set<String> = ["aac", "mp3", "alac"]
+
+    /// The videos' details when they can be joined by copying streams into an MP4, or nil when they
+    /// differ or use a codec MP4 can't hold, so they must be re-encoded.
+    private func copyableInfos(_ paths: [URL]) throws -> [VideoInfo]? {
         let infos = try paths.map { try probe($0) }
         guard let first = infos.first else { throw MergeFailure(message: "Choose at least one video.") }
-        if infos.contains(where: { $0.videoCount != 1 }) {
-            throw CopyMismatch(message: "A None merge without re-encoding needs exactly one video track in each file.")
+        let compatible = infos.allSatisfy { info in
+            info.videoCount == 1
+                && Self.copyVideoCodecs.contains(info.videoCodec)
+                && info.audioTracks.allSatisfy { Self.copyAudioCodecs.contains($0.codec) }
+                && info.videoCodec == first.videoCodec
+                && info.width == first.width && info.height == first.height
+                && info.rotation == first.rotation
+                && Self.sameRate(info.realFrameRate, first.realFrameRate)
+                && info.pixelFormat == first.pixelFormat
+                && info.sampleAspectRatio == first.sampleAspectRatio
+                && info.audioTracks == first.audioTracks
         }
-        for (index, info) in infos.enumerated().dropFirst() {
-            let fields: [(String, Bool)] = [
-                ("video codec", info.videoCodec == first.videoCodec),
-                ("video size", info.width == first.width && info.height == first.height),
-                ("orientation", info.rotation == first.rotation),
-                ("frame rate", Self.sameRate(info.realFrameRate, first.realFrameRate)),
-                ("pixel format", info.pixelFormat == first.pixelFormat),
-                ("pixel aspect ratio", info.sampleAspectRatio == first.sampleAspectRatio),
-                ("audio tracks and format", info.audioTracks == first.audioTracks)
-            ]
-            if let mismatch = fields.first(where: { !$0.1 })?.0 {
-                throw CopyMismatch(message: "Video \(index + 1) has a different \(mismatch), so the videos can't be merged without re-encoding.")
-            }
-        }
-        return infos
+        return compatible ? infos : nil
     }
 
     private static func rateValue(_ rate: String) -> Double? {
@@ -287,10 +282,8 @@ final class MergeEngine {
     /// Converts one video. Reversing always re-encodes, since a stream copy can't change frame order.
     private func singleCommand(_ source: URL, _ output: URL, _ info: VideoInfo,
                                quality: Quality, reverse: Bool = false, forceEncode: Bool = false) -> [String] {
-        let copyVideoCodecs: Set<String> = ["h264", "hevc", "av1", "mpeg4"]
-        let copyAudioCodecs: Set<String> = ["aac", "mp3", "alac"]
-        let encodeVideo = forceEncode || reverse || !copyVideoCodecs.contains(info.videoCodec)
-        let encodeAudio = forceEncode || reverse || info.audioTracks.contains { !copyAudioCodecs.contains($0.codec) }
+        let encodeVideo = forceEncode || reverse || !Self.copyVideoCodecs.contains(info.videoCodec)
+        let encodeAudio = forceEncode || reverse || info.audioTracks.contains { !Self.copyAudioCodecs.contains($0.codec) }
         var command = ["-hide_banner", "-nostdin", "-y", "-loglevel", "error"] + Self.progressArguments
             + ["-i", source.path, "-map", "0:v:0", "-map", "0:a?"]
         if reverse { command += ["-vf", "reverse", "-af", "areverse"] }
@@ -443,8 +436,8 @@ final class MergeEngine {
 
     /// Converts or merges the videos. `progress` receives a 0...1 fraction on a background thread.
     /// `reversed` marks videos to play backwards; empty means none. Any reversed video forces re-encoding.
-    /// With transition "None", `reencode` false and nothing reversed, mismatched videos throw CopyMismatch.
-    func merge(_ paths: [URL], reversed: [Bool] = [], transition: String, quality: Quality, reencode: Bool = false,
+    /// With transition "None" and nothing reversed, matching MP4-ready videos are copied; others are re-encoded.
+    func merge(_ paths: [URL], reversed: [Bool] = [], transition: String, quality: Quality,
                progress: @escaping (Double) -> Void = { _ in }) throws -> URL {
         lock.lock()
         cancelled = false
@@ -479,11 +472,20 @@ final class MergeEngine {
             { seconds in if total > 0 { progress(min(1, max(0, seconds / total))) } }
         }
 
-        let result: CommandResult
+        func render() throws {
+            let xfade: String? = transition == "None" ? nil : transition
+            if let xfade, !availableTransitions().contains(xfade) {
+                throw MergeFailure(message: "FFmpeg does not support the \(xfade) transition.")
+            }
+            let render = try renderCommand(paths, tempOutput, reversed: reversed, transition: xfade, quality)
+            let result = try run(ffmpeg, render.command, progress: report(over: render.duration))
+            if result.status != 0 { throw MergeFailure(message: Self.ffmpegError(result.output, status: result.status)) }
+        }
+
         if paths.count == 1 {
             let info = try probe(paths[0])
-            result = try run(ffmpeg, singleCommand(paths[0], tempOutput, info, quality: quality, reverse: reversed[0]),
-                             progress: report(over: info.duration))
+            let result = try run(ffmpeg, singleCommand(paths[0], tempOutput, info, quality: quality, reverse: reversed[0]),
+                                 progress: report(over: info.duration))
             if result.status != 0 && Self.containerError(result.output) {
                 let retry = try run(ffmpeg, singleCommand(paths[0], tempOutput, info, quality: quality,
                                                           reverse: reversed[0], forceEncode: true),
@@ -492,16 +494,7 @@ final class MergeEngine {
             } else if result.status != 0 {
                 throw MergeFailure(message: Self.ffmpegError(result.output, status: result.status))
             }
-        } else if transition != "None" || reencode || reversed.contains(true) {
-            let xfade: String? = transition == "None" ? nil : transition
-            if let xfade, !availableTransitions().contains(xfade) {
-                throw MergeFailure(message: "FFmpeg does not support the \(xfade) transition.")
-            }
-            let render = try renderCommand(paths, tempOutput, reversed: reversed, transition: xfade, quality)
-            result = try run(ffmpeg, render.command, progress: report(over: render.duration))
-            if result.status != 0 { throw MergeFailure(message: Self.ffmpegError(result.output, status: result.status)) }
-        } else {
-            let infos = try validateCopy(paths)
+        } else if transition == "None", !reversed.contains(true), let infos = try copyableInfos(paths) {
             // The concat demuxer reads every file's timestamps in the first file's time base, so a video
             // with another time base (MOV's 1/600 next to MP4's 1/19200) would play at the wrong speed and
             // stall players. Copy such videos into the first video's time base before joining.
@@ -521,18 +514,19 @@ final class MergeEngine {
             listURL = list
             let content = sources.map { "file \(Self.concatPath($0.path))\n" }.joined()
             try content.write(to: list, atomically: false, encoding: .utf8)
-            result = try run(ffmpeg, ["-hide_banner", "-nostdin", "-y", "-loglevel", "error"] + Self.progressArguments
-                             + ["-f", "concat", "-safe", "0", "-i", list.path,
-                                "-map", "0:v:0", "-map", "0:a?", "-c", "copy"]
-                             + Self.videoTag(infos[0].videoCodec)
-                             + ["-movflags", "+faststart", tempOutput.path],
-                             progress: report(over: infos.map(\.duration).reduce(0, +)))
-            if result.status != 0 {
-                if Self.containerError(result.output) {
-                    throw MergeFailure(message: "MP4 cannot store one of these video or audio tracks without re-encoding. No source files were changed.")
-                }
+            let result = try run(ffmpeg, ["-hide_banner", "-nostdin", "-y", "-loglevel", "error"] + Self.progressArguments
+                                 + ["-f", "concat", "-safe", "0", "-i", list.path,
+                                    "-map", "0:v:0", "-map", "0:a?", "-c", "copy"]
+                                 + Self.videoTag(infos[0].videoCodec)
+                                 + ["-movflags", "+faststart", tempOutput.path],
+                                 progress: report(over: infos.map(\.duration).reduce(0, +)))
+            if result.status != 0 && Self.containerError(result.output) {
+                try render()
+            } else if result.status != 0 {
                 throw MergeFailure(message: Self.ffmpegError(result.output, status: result.status))
             }
+        } else {
+            try render()
         }
 
         let output = outputURL(for: paths, reversed: reversed[0])

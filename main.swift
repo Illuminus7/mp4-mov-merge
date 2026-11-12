@@ -595,10 +595,10 @@ final class MergeWindowController: NSObject, NSWindowDelegate {
         }
         let transition = paths.count > 1 ? (transitionPopup.titleOfSelectedItem ?? "None") : "None"
         let quality = Quality(rawValue: qualityPopup.titleOfSelectedItem ?? "") ?? .veryHigh
-        startMerge(paths, reversed: selectedReversed, transition: transition, quality: quality, reencode: false)
+        startMerge(paths, reversed: selectedReversed, transition: transition, quality: quality)
     }
 
-    private func startMerge(_ paths: [URL], reversed: [Bool], transition: String, quality: Quality, reencode: Bool) {
+    private func startMerge(_ paths: [URL], reversed: [Bool], transition: String, quality: Quality) {
         let activity: String
         if paths.count == 1 {
             activity = reversed[0] ? "Reversing" : "Converting"
@@ -606,8 +606,6 @@ final class MergeWindowController: NSObject, NSWindowDelegate {
             activity = "Reversing and merging"
         } else if transition != "None" {
             activity = "Rendering the \(transition) transition"
-        } else if reencode {
-            activity = "Re-encoding and merging"
         } else {
             activity = "Merging"
         }
@@ -621,15 +619,14 @@ final class MergeWindowController: NSObject, NSWindowDelegate {
         let engine = self.engine
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = Result {
-                try engine.merge(paths, reversed: reversed, transition: transition, quality: quality,
-                                 reencode: reencode) { fraction in
+                try engine.merge(paths, reversed: reversed, transition: transition, quality: quality) { fraction in
                     DispatchQueue.main.async { [weak self] in
                         self?.showProgress(fraction, activity: activity, started: started)
                     }
                 }
             }
             DispatchQueue.main.async { [weak self] in
-                self?.mergeFinished(result, paths: paths, reversed: reversed, quality: quality)
+                self?.mergeFinished(result, paths: paths)
             }
         }
     }
@@ -649,7 +646,7 @@ final class MergeWindowController: NSObject, NSWindowDelegate {
         setStatus(text)
     }
 
-    private func mergeFinished(_ result: Result<URL, Error>, paths: [URL], reversed: [Bool], quality: Quality) {
+    private func mergeFinished(_ result: Result<URL, Error>, paths: [URL]) {
         busy = false
         progressBar.stopAnimation(nil)
         updateState()
@@ -660,26 +657,11 @@ final class MergeWindowController: NSObject, NSWindowDelegate {
         switch result {
         case .success(let output):
             setStatus("MP4 saved beside the first video: \(output.lastPathComponent)", color: Theme.success)
-        case .failure(let error as CopyMismatch):
-            setStatus(error.message, color: Theme.warning)
-            offerReencode(error.message, paths: paths, reversed: reversed, quality: quality)
         case .failure(let error as MergeCancelled):
             setStatus(error.localizedDescription, color: Theme.warning)
         case .failure(let error):
             let action = paths.count == 1 ? "Conversion" : "Merge"
             setStatus("\(action) failed: \(error.localizedDescription)", color: Theme.error)
-        }
-    }
-
-    private func offerReencode(_ reason: String, paths: [URL], reversed: [Bool], quality: Quality) {
-        let alert = NSAlert()
-        alert.messageText = "These videos can't be joined without re-encoding"
-        alert.informativeText = "\(reason)\n\nRe-encode them to H.264 at \(quality.rawValue) quality and merge? This takes longer, and videos that differ in size are fitted to the first video's frame."
-        alert.addButton(withTitle: "Re-encode and Merge")
-        alert.addButton(withTitle: "Cancel")
-        alert.beginSheetModal(for: window) { [weak self] response in
-            guard let self, response == .alertFirstButtonReturn, !self.busy else { return }
-            self.startMerge(paths, reversed: reversed, transition: "None", quality: quality, reencode: true)
         }
     }
 

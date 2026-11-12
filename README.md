@@ -56,7 +56,7 @@ Lower CRF means higher quality and a larger file.
 
 ### Re-encoding
 
-A merge of matching videos with no transition is copied without re-encoding. If the videos differ, the app offers to re-encode and merge them. A single H.264, HEVC, AV1 or MPEG-4 video is copied into an MP4 without re-encoding, so Quality doesn't apply to it.
+A merge of matching videos with no transition is copied without re-encoding. If the videos differ, or use a codec MP4 can't hold as is (such as ProRes video or PCM audio from a MOV), the app re-encodes and merges them at the selected Quality automatically, fitting videos that differ in size to the first video's frame. A single H.264, HEVC, AV1 or MPEG-4 video is copied into an MP4 without re-encoding, so Quality doesn't apply to it.
 
 Reversed videos are always re-encoded at the selected Quality, so a merge that includes one never copies streams.
 
