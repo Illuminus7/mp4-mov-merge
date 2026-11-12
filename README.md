@@ -30,7 +30,7 @@ Videos are saved beside the first video you pick, with `_merged` or `_converted`
 
 ## Install
 
-1. Download `mp4-mov-merge-1.0.dmg` from the [latest release](../../releases/latest).
+1. Download `mp4-mov-merge-1.1.dmg` from the [latest release](../../releases/latest).
 2. Open the DMG and drag **mp4-mov merge** into **Applications**.
 3. The app is not signed with an Apple developer certificate, so macOS blocks it the first time. Open **System Settings → Privacy & Security**, scroll to the message about "mp4-mov merge", and click **Open Anyway**. You only need to do this once.
 

@@ -3,7 +3,7 @@ set -e
 
 PROJECT_DIR="${0:A:h}"
 APP_NAME="mp4-mov merge.app"
-VERSION="1.0"
+VERSION="1.1"
 DMG="$PROJECT_DIR/mp4-mov-merge-$VERSION.dmg"
 STAGING="$PROJECT_DIR/.dmg-build"
 trap '/bin/rm -rf "$STAGING"' EXIT
